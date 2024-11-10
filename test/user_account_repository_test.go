@@ -3,9 +3,10 @@ package test
 import (
 	"context"
 	"fmt"
-	"github.com/j5ik2o/event-store-adapter-go/pkg"
-	"github.com/j5ik2o/event-store-adapter-go/pkg/common"
 	"testing"
+
+	"github.com/szks-repo/event-store-adapter-go/pkg"
+	"github.com/szks-repo/event-store-adapter-go/pkg/common"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,23 +24,23 @@ func newUserAccountRepository(eventStore pkg.EventStore) *userAccountRepository 
 	}
 }
 
-func (r *userAccountRepository) storeEvent(event pkg.Event, version uint64) error {
-	return r.eventStore.PersistEvent(event, version)
+func (r *userAccountRepository) storeEvent(ctx context.Context, event pkg.Event, version uint64) error {
+	return r.eventStore.PersistEvent(ctx, event, version)
 }
 
-func (r *userAccountRepository) storeEventAndSnapshot(event pkg.Event, aggregate pkg.Aggregate) error {
-	return r.eventStore.PersistEventAndSnapshot(event, aggregate)
+func (r *userAccountRepository) storeEventAndSnapshot(ctx context.Context, event pkg.Event, aggregate pkg.Aggregate) error {
+	return r.eventStore.PersistEventAndSnapshot(ctx, event, aggregate)
 }
 
-func (r *userAccountRepository) findById(id pkg.AggregateId) (*userAccount, error) {
-	result, err := r.eventStore.GetLatestSnapshotById(id)
+func (r *userAccountRepository) findById(ctx context.Context, id pkg.AggregateId) (*userAccount, error) {
+	result, err := r.eventStore.GetLatestSnapshotById(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if result.Empty() {
 		return nil, fmt.Errorf("not found")
 	} else {
-		events, err := r.eventStore.GetEventsByIdSinceSeqNr(id, result.Aggregate().GetSeqNr()+1)
+		events, err := r.eventStore.GetEventsByIdSinceSeqNr(ctx, id, result.Aggregate().GetSeqNr()+1)
 		if err != nil {
 			return nil, err
 		}
@@ -74,8 +75,8 @@ func Test_Repository_DynamoDB_StoreAndFindById(t *testing.T) {
 	err = common.CreateSnapshotTable(t, ctx, dynamodbClient, "snapshot", "snapshot-aid-index")
 	require.Nil(t, err)
 
-	eventConverter := func(m map[string]interface{}) (pkg.Event, error) {
-		aggregateMap, ok := m["AggregateId"].(map[string]interface{})
+	eventConverter := func(m map[string]any) (pkg.Event, error) {
+		aggregateMap, ok := m["AggregateId"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("AggregateId is not a map")
 		}
@@ -106,8 +107,8 @@ func Test_Repository_DynamoDB_StoreAndFindById(t *testing.T) {
 			return nil, fmt.Errorf("unknown event type")
 		}
 	}
-	aggregateConverter := func(m map[string]interface{}) (pkg.Aggregate, error) {
-		idMap, ok := m["Id"].(map[string]interface{})
+	aggregateConverter := func(m map[string]any) (pkg.Aggregate, error) {
+		idMap, ok := m["Id"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("Id is not a map")
 		}
@@ -133,9 +134,9 @@ func Test_Repository_DynamoDB_StoreAndFindById(t *testing.T) {
 
 	repository := newUserAccountRepository(eventStore)
 	initial, userAccountCreated := newUserAccount(newUserAccountId("1"), "test")
-	err = repository.storeEventAndSnapshot(userAccountCreated, initial)
+	err = repository.storeEventAndSnapshot(ctx, userAccountCreated, initial)
 	require.Nil(t, err)
-	actual, err := repository.findById(&initial.Id)
+	actual, err := repository.findById(ctx, &initial.Id)
 	require.Nil(t, err)
 
 	assert.Equal(t, initial, actual)
@@ -144,22 +145,22 @@ func Test_Repository_DynamoDB_StoreAndFindById(t *testing.T) {
 	require.Nil(t, err)
 	result.Aggregate.Version = actual.Version
 
-	err = repository.storeEventAndSnapshot(result.Event, result.Aggregate)
+	err = repository.storeEventAndSnapshot(ctx, result.Event, result.Aggregate)
 	require.Nil(t, err)
-	actual2, err := repository.findById(&initial.Id)
+	actual2, err := repository.findById(ctx, &initial.Id)
 	require.Nil(t, err)
 	assert.Equal(t, "test2", actual2.Name)
-
 }
 
 func Test_Repository_OnMemory_StoreAndFindById(t *testing.T) {
+	ctx := context.Background()
 	eventStore := pkg.NewEventStoreOnMemory()
 	repository := newUserAccountRepository(eventStore)
 	initial, userAccountCreated := newUserAccount(newUserAccountId("1"), "test")
 
-	err := repository.storeEventAndSnapshot(userAccountCreated, initial)
+	err := repository.storeEventAndSnapshot(ctx, userAccountCreated, initial)
 	require.Nil(t, err)
-	actual, err := repository.findById(&initial.Id)
+	actual, err := repository.findById(ctx, &initial.Id)
 	require.Nil(t, err)
 
 	assert.Equal(t, initial, actual)
@@ -167,10 +168,9 @@ func Test_Repository_OnMemory_StoreAndFindById(t *testing.T) {
 	result, err := actual.Rename("test2")
 	require.Nil(t, err)
 
-	err = repository.storeEventAndSnapshot(result.Event, result.Aggregate)
+	err = repository.storeEventAndSnapshot(ctx, result.Event, result.Aggregate)
 	require.Nil(t, err)
-	actual2, err := repository.findById(&initial.Id)
+	actual2, err := repository.findById(ctx, &initial.Id)
 	require.Nil(t, err)
 	assert.Equal(t, "test2", actual2.Name)
-
 }

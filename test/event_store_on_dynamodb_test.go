@@ -3,10 +3,11 @@ package test
 import (
 	"context"
 	"fmt"
-	"github.com/j5ik2o/event-store-adapter-go/pkg"
-	"github.com/j5ik2o/event-store-adapter-go/pkg/common"
 	"testing"
 	"time"
+
+	"github.com/szks-repo/event-store-adapter-go/pkg"
+	"github.com/szks-repo/event-store-adapter-go/pkg/common"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/stretchr/testify/assert"
@@ -141,6 +142,7 @@ func Test_EventStoreOnDynamoDB_WriteAndRead(t *testing.T) {
 	t.Logf("userAccountCreated: %v", userAccountCreated)
 
 	err = eventStore.PersistEventAndSnapshot(
+		ctx,
 		userAccountCreated,
 		initial,
 	)
@@ -152,12 +154,13 @@ func Test_EventStoreOnDynamoDB_WriteAndRead(t *testing.T) {
 	t.Logf("updated: %v", updated)
 
 	err = eventStore.PersistEvent(
+		ctx,
 		updated.Event,
 		updated.Aggregate.Version,
 	)
 	require.Nil(t, err)
 
-	snapshotResult, err := eventStore.GetLatestSnapshotById(&userAccountId1)
+	snapshotResult, err := eventStore.GetLatestSnapshotById(ctx, &userAccountId1)
 	require.NotNil(t, snapshotResult)
 	require.Nil(t, err)
 	t.Logf("snapshotResult: %v", snapshotResult)
@@ -167,7 +170,7 @@ func Test_EventStoreOnDynamoDB_WriteAndRead(t *testing.T) {
 	require.NotNil(t, ok)
 	t.Logf("UserAccount: %v", userAccount1)
 
-	events, err := eventStore.GetEventsByIdSinceSeqNr(&userAccountId1, userAccount1.GetSeqNr()+1)
+	events, err := eventStore.GetEventsByIdSinceSeqNr(ctx, &userAccountId1, userAccount1.GetSeqNr()+1)
 	require.NotNil(t, events)
 	require.Nil(t, err)
 	t.Logf("Events: %v", events)
@@ -289,6 +292,7 @@ func Test_EventStoreOnDynamoDB_PersistsEventAndSnapshot(t *testing.T) {
 	require.NotNil(t, userAccountCreated)
 
 	err = eventStore.PersistEventAndSnapshot(
+		ctx,
 		userAccountCreated,
 		initial,
 	)

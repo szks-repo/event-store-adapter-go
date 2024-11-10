@@ -1,15 +1,17 @@
 package test
 
 import (
-	event_store_adapter_go "github.com/j5ik2o/event-store-adapter-go/pkg"
+	"context"
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
+	"github.com/szks-repo/event-store-adapter-go/pkg"
 )
 
 func Test_EventStoreOnMemory_WriteAndRead(t *testing.T) {
 	// Given
-	eventStore := event_store_adapter_go.NewEventStoreOnMemory()
+	eventStore := pkg.NewEventStoreOnMemory()
 	require.NotNil(t, eventStore)
 
 	userAccountId1 := newUserAccountId("1")
@@ -20,10 +22,8 @@ func Test_EventStoreOnMemory_WriteAndRead(t *testing.T) {
 	t.Logf("initial: %v", initial)
 	t.Logf("userAccountCreated: %v", userAccountCreated)
 
-	err := eventStore.PersistEventAndSnapshot(
-		userAccountCreated,
-		initial,
-	)
+	ctx := context.Background()
+	err := eventStore.PersistEventAndSnapshot(ctx, userAccountCreated, initial)
 	require.Nil(t, err)
 
 	updated, err := initial.Rename("test2")
@@ -31,13 +31,10 @@ func Test_EventStoreOnMemory_WriteAndRead(t *testing.T) {
 	require.Nil(t, err)
 	t.Logf("updated: %v", updated)
 
-	err = eventStore.PersistEvent(
-		updated.Event,
-		updated.Aggregate.Version,
-	)
+	err = eventStore.PersistEvent(ctx, updated.Event, updated.Aggregate.Version)
 	require.Nil(t, err)
 
-	snapshotResult, err := eventStore.GetLatestSnapshotById(&userAccountId1)
+	snapshotResult, err := eventStore.GetLatestSnapshotById(ctx, &userAccountId1)
 	require.NotNil(t, snapshotResult)
 	require.Nil(t, err)
 	t.Logf("snapshotResult: %v", snapshotResult)
@@ -47,7 +44,7 @@ func Test_EventStoreOnMemory_WriteAndRead(t *testing.T) {
 	require.NotNil(t, ok)
 	t.Logf("UserAccount: %v", userAccount1)
 
-	events, err := eventStore.GetEventsByIdSinceSeqNr(&userAccountId1, userAccount1.GetSeqNr()+1)
+	events, err := eventStore.GetEventsByIdSinceSeqNr(ctx, &userAccountId1, userAccount1.GetSeqNr()+1)
 	require.NotNil(t, events)
 	require.Nil(t, err)
 	t.Logf("Events: %v", events)
@@ -66,7 +63,8 @@ func Test_EventStoreOnMemory_WriteAndRead(t *testing.T) {
 
 // Persists an event and a snapshot for a user account
 func Test_EventStoreOnMemory_PersistsEventAndSnapshot(t *testing.T) {
-	eventStore := event_store_adapter_go.NewEventStoreOnMemory()
+	ctx := context.Background()
+	eventStore := pkg.NewEventStoreOnMemory()
 	require.NotNil(t, eventStore)
 
 	userAccountId1 := newUserAccountId("1")
@@ -76,9 +74,9 @@ func Test_EventStoreOnMemory_PersistsEventAndSnapshot(t *testing.T) {
 	require.NotNil(t, userAccountCreated)
 
 	err := eventStore.PersistEventAndSnapshot(
+		ctx,
 		userAccountCreated,
 		initial,
 	)
 	require.Nil(t, err)
-
 }

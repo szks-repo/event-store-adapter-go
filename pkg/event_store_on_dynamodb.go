@@ -164,7 +164,7 @@ func NewEventStoreOnDynamoDB(
 	eventConverter EventConverter,
 	snapshotConverter AggregateConverter,
 	options ...EventStoreOption,
-) (*EventStoreOnDynamoDB, error) {
+) (EventStore, error) {
 	if client == nil {
 		return nil, errors.New("client is nil")
 	}
@@ -184,33 +184,35 @@ func NewEventStoreOnDynamoDB(
 		return nil, errors.New("shardCount is zero")
 	}
 	es := &EventStoreOnDynamoDB{
-		client,
-		journalTableName,
-		snapshotTableName,
-		journalAidIndexName,
-		snapshotAidIndexName,
-		shardCount,
-		eventConverter,
-		snapshotConverter,
-		false,
-		1,
-		math.MaxInt64,
-		&DefaultKeyResolver{},
-		&DefaultEventSerializer{},
-		&DefaultSnapshotSerializer{},
+		client:               client,
+		journalTableName:     journalTableName,
+		snapshotTableName:    snapshotTableName,
+		journalAidIndexName:  journalAidIndexName,
+		snapshotAidIndexName: snapshotAidIndexName,
+		shardCount:           shardCount,
+		eventConverter:       eventConverter,
+		snapshotConverter:    snapshotConverter,
+		keepSnapshot:         false,
+		keepSnapshotCount:    1,
+		deleteTtl:            math.MaxInt64,
+		keyResolver:          &DefaultKeyResolver{},
+		eventSerializer:      &DefaultEventSerializer{},
+		snapshotSerializer:   &DefaultSnapshotSerializer{},
 	}
 	for _, option := range options {
 		if err := option(es); err != nil {
 			return nil, err
 		}
 	}
+
 	return es, nil
 }
 
-func (es *EventStoreOnDynamoDB) GetLatestSnapshotById(aggregateId AggregateId) (*AggregateResult, error) {
+func (es *EventStoreOnDynamoDB) GetLatestSnapshotById(ctx context.Context, aggregateId AggregateId) (*AggregateResult, error) {
 	if aggregateId == nil {
-		return nil, errors.New("aggregateId is nil")
+		panic("aggregateId is nil")
 	}
+
 	request := &dynamodb.QueryInput{
 		TableName:              aws.String(es.snapshotTableName),
 		IndexName:              aws.String(es.snapshotAidIndexName),
@@ -225,33 +227,34 @@ func (es *EventStoreOnDynamoDB) GetLatestSnapshotById(aggregateId AggregateId) (
 		},
 		Limit: aws.Int32(1),
 	}
-	result, err := es.client.Query(context.Background(), request)
+
+	result, err := es.client.Query(ctx, request)
 	if err != nil {
 		return nil, NewIOError("Failed to GetLatestSnapshotById query", err)
-	}
-	if len(result.Items) == 0 {
+	} else if len(result.Items) == 0 {
 		return &AggregateResult{}, nil
-	} else if len(result.Items) == 1 {
-		version, err := strconv.ParseUint(result.Items[0]["version"].(*types.AttributeValueMemberN).Value, 10, 64)
-		if err != nil {
-			return nil, NewDeserializationError("Failed to parse the version", err)
-		}
-		var aggregateMap map[string]interface{}
-		err = es.snapshotSerializer.Deserialize(result.Items[0]["payload"].(*types.AttributeValueMemberB).Value, &aggregateMap)
-		if err != nil {
-			return nil, err
-		}
-		aggregate, err := es.snapshotConverter(aggregateMap)
-		if err != nil {
-			return nil, NewDeserializationError("Failed to convert the snapshot", err)
-		}
-		return &AggregateResult{aggregate.WithVersion(version)}, nil
-	} else {
+	} else if len(result.Items) > 1 {
 		panic("len(result.Items) > 1")
 	}
+
+	version, err := strconv.ParseUint(result.Items[0]["version"].(*types.AttributeValueMemberN).Value, 10, 64)
+	if err != nil {
+		return nil, NewDeserializationError("Failed to parse the version", err)
+	}
+
+	var aggregateMap map[string]any
+	if err := es.snapshotSerializer.Deserialize(result.Items[0]["payload"].(*types.AttributeValueMemberB).Value, &aggregateMap); err != nil {
+		return nil, err
+	}
+
+	aggregate, err := es.snapshotConverter(aggregateMap)
+	if err != nil {
+		return nil, NewDeserializationError("Failed to convert the snapshot", err)
+	}
+	return &AggregateResult{aggregate.WithVersion(version)}, nil
 }
 
-func (es *EventStoreOnDynamoDB) GetEventsByIdSinceSeqNr(aggregateId AggregateId, seqNr uint64) ([]Event, error) {
+func (es *EventStoreOnDynamoDB) GetEventsByIdSinceSeqNr(ctx context.Context, aggregateId AggregateId, seqNr uint64) ([]Event, error) {
 	if aggregateId == nil {
 		panic("aggregateId is nil")
 	}
@@ -272,46 +275,48 @@ func (es *EventStoreOnDynamoDB) GetEventsByIdSinceSeqNr(aggregateId AggregateId,
 	if err != nil {
 		return nil, NewIOError("Failed to GetEventsByIdSinceSeqNr query", err)
 	}
-	var events []Event
-	if len(result.Items) > 0 {
-		for _, item := range result.Items {
-			var eventMap map[string]interface{}
-			if err := es.eventSerializer.Deserialize(item["payload"].(*types.AttributeValueMemberB).Value, &eventMap); err != nil {
-				return nil, err
-			}
-			event, err := es.eventConverter(eventMap)
-			if err != nil {
-				return nil, NewDeserializationError("Failed to convert the event", err)
-			}
-			events = append(events, event)
+
+	events := make([]Event, 0, len(result.Items))
+	for _, item := range result.Items {
+		var eventMap map[string]any
+		if err := es.eventSerializer.Deserialize(item["payload"].(*types.AttributeValueMemberB).Value, &eventMap); err != nil {
+			return nil, err
 		}
+
+		event, err := es.eventConverter(eventMap)
+		if err != nil {
+			return nil, NewDeserializationError("Failed to convert the event", err)
+		}
+		events = append(events, event)
 	}
+
 	return events, nil
 }
 
-func (es *EventStoreOnDynamoDB) PersistEvent(event Event, version uint64) error {
+func (es *EventStoreOnDynamoDB) PersistEvent(ctx context.Context, event Event, version uint64) error {
 	if event.IsCreated() {
 		panic("event is created")
 	}
-	if err := es.updateEventAndSnapshotOpt(event, version, nil); err != nil {
+	if err := es.updateEventAndSnapshotOpt(ctx, event, version, nil); err != nil {
 		return err
 	}
-	if err := es.tryPurgeExcessSnapshots(event); err != nil {
+	if err := es.tryPurgeExcessSnapshots(ctx, event); err != nil {
 		return err
 	}
+
 	return nil
 }
 
-func (es *EventStoreOnDynamoDB) PersistEventAndSnapshot(event Event, aggregate Aggregate) error {
+func (es *EventStoreOnDynamoDB) PersistEventAndSnapshot(ctx context.Context, event Event, aggregate Aggregate) error {
 	if event.IsCreated() {
-		if err := es.createEventAndSnapshot(event, aggregate); err != nil {
+		if err := es.createEventAndSnapshot(ctx, event, aggregate); err != nil {
 			return err
 		}
 	} else {
-		if err := es.updateEventAndSnapshotOpt(event, aggregate.GetVersion(), aggregate); err != nil {
+		if err := es.updateEventAndSnapshotOpt(ctx, event, aggregate.GetVersion(), aggregate); err != nil {
 			return err
 		}
-		if err := es.tryPurgeExcessSnapshots(event); err != nil {
+		if err := es.tryPurgeExcessSnapshots(ctx, event); err != nil {
 			return err
 		}
 	}
@@ -335,12 +340,14 @@ func (es *EventStoreOnDynamoDB) putSnapshot(event Event, seqNr uint64, aggregate
 	if aggregate == nil {
 		return nil, errors.New("aggregate is nil")
 	}
+
 	pkey := es.keyResolver.ResolvePkey(event.GetAggregateId(), es.shardCount)
 	skey := es.keyResolver.ResolveSkey(event.GetAggregateId(), seqNr)
 	payload, err := es.snapshotSerializer.Serialize(aggregate)
 	if err != nil {
 		return nil, err
 	}
+
 	input := types.Put{
 		TableName: aws.String(es.snapshotTableName),
 		Item: map[string]types.AttributeValue{
@@ -354,6 +361,7 @@ func (es *EventStoreOnDynamoDB) putSnapshot(event Event, seqNr uint64, aggregate
 		},
 		ConditionExpression: aws.String("attribute_not_exists(pkey) AND attribute_not_exists(skey)"),
 	}
+
 	return &input, nil
 }
 
@@ -373,6 +381,7 @@ func (es *EventStoreOnDynamoDB) updateSnapshot(event Event, seqNr uint64, versio
 	if event == nil {
 		return nil, errors.New("event is nil")
 	}
+
 	pkey := es.keyResolver.ResolvePkey(event.GetAggregateId(), es.shardCount)
 	skey := es.keyResolver.ResolveSkey(event.GetAggregateId(), seqNr)
 	update := types.Update{
@@ -402,6 +411,7 @@ func (es *EventStoreOnDynamoDB) updateSnapshot(event Event, seqNr uint64, versio
 		update.ExpressionAttributeValues[":seq_nr"] = &types.AttributeValueMemberN{Value: strconv.FormatUint(seqNr, 10)}
 		update.ExpressionAttributeValues[":payload"] = &types.AttributeValueMemberB{Value: payload}
 	}
+
 	return &update, nil
 }
 
@@ -417,12 +427,14 @@ func (es *EventStoreOnDynamoDB) putJournal(event Event) (*types.Put, error) {
 	if event == nil {
 		return nil, errors.New("event is nil")
 	}
+
 	pkey := es.keyResolver.ResolvePkey(event.GetAggregateId(), es.shardCount)
 	skey := es.keyResolver.ResolveSkey(event.GetAggregateId(), event.GetSeqNr())
 	payload, err := es.eventSerializer.Serialize(event)
 	if err != nil {
 		return nil, err
 	}
+
 	input := types.Put{
 		TableName: aws.String(es.journalTableName),
 		Item: map[string]types.AttributeValue{
@@ -435,6 +447,7 @@ func (es *EventStoreOnDynamoDB) putJournal(event Event) (*types.Put, error) {
 		},
 		ConditionExpression: aws.String("attribute_not_exists(pkey) AND attribute_not_exists(skey)"),
 	}
+
 	return &input, nil
 }
 
@@ -444,14 +457,14 @@ func (es *EventStoreOnDynamoDB) putJournal(event Event) (*types.Put, error) {
 // - event is an event to store.
 // # Returns
 // - an error
-func (es *EventStoreOnDynamoDB) tryPurgeExcessSnapshots(event Event) error {
+func (es *EventStoreOnDynamoDB) tryPurgeExcessSnapshots(ctx context.Context, event Event) error {
 	if es.keepSnapshot && es.keepSnapshotCount > 0 {
 		if es.deleteTtl < math.MaxInt64 {
-			if err := es.updateTtlOfExcessSnapshots(event.GetAggregateId()); err != nil {
+			if err := es.updateTtlOfExcessSnapshots(ctx, event.GetAggregateId()); err != nil {
 				return err
 			}
 		} else {
-			if err := es.deleteExcessSnapshots(event.GetAggregateId()); err != nil {
+			if err := es.deleteExcessSnapshots(ctx, event.GetAggregateId()); err != nil {
 				return err
 			}
 		}
@@ -467,7 +480,7 @@ func (es *EventStoreOnDynamoDB) tryPurgeExcessSnapshots(event Event) error {
 // - aggregate is an aggregate to store.
 // # Returns
 // - an error
-func (es *EventStoreOnDynamoDB) updateEventAndSnapshotOpt(event Event, version uint64, aggregate Aggregate) error {
+func (es *EventStoreOnDynamoDB) updateEventAndSnapshotOpt(ctx context.Context, event Event, version uint64, aggregate Aggregate) error {
 	if event == nil {
 		panic("event is nil")
 	}
@@ -479,6 +492,7 @@ func (es *EventStoreOnDynamoDB) updateEventAndSnapshotOpt(event Event, version u
 	if err != nil {
 		return err
 	}
+
 	transactItems := []types.TransactWriteItem{
 		{Update: updateSnapshot},
 		{Put: putJournal},
@@ -490,11 +504,7 @@ func (es *EventStoreOnDynamoDB) updateEventAndSnapshotOpt(event Event, version u
 		}
 		transactItems = append(transactItems, types.TransactWriteItem{Put: putSnapshot2})
 	}
-	request := &dynamodb.TransactWriteItemsInput{
-		TransactItems: transactItems,
-	}
-	_, err = es.client.TransactWriteItems(context.Background(), request)
-	if err != nil {
+	if _, err := es.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: transactItems}); err != nil {
 		var t *types.TransactionCanceledException
 		switch {
 		case errors.As(err, &t):
@@ -508,6 +518,7 @@ func (es *EventStoreOnDynamoDB) updateEventAndSnapshotOpt(event Event, version u
 			return NewIOError("Failed to transact write items", err)
 		}
 	}
+
 	return nil
 }
 
@@ -518,7 +529,7 @@ func (es *EventStoreOnDynamoDB) updateEventAndSnapshotOpt(event Event, version u
 // - aggregate is an aggregate to store.
 // # Returns
 // - an error
-func (es *EventStoreOnDynamoDB) createEventAndSnapshot(event Event, aggregate Aggregate) error {
+func (es *EventStoreOnDynamoDB) createEventAndSnapshot(ctx context.Context, event Event, aggregate Aggregate) error {
 	if event == nil {
 		return errors.New("event is nil")
 	}
@@ -530,11 +541,11 @@ func (es *EventStoreOnDynamoDB) createEventAndSnapshot(event Event, aggregate Ag
 	if err != nil {
 		return err
 	}
+
 	transactItems := []types.TransactWriteItem{
 		{Put: putSnapshot},
 		{Put: putJournal},
 	}
-
 	if es.keepSnapshot {
 		putSnapshot2, err := es.putSnapshot(event, aggregate.GetSeqNr(), aggregate)
 		if err != nil {
@@ -542,8 +553,8 @@ func (es *EventStoreOnDynamoDB) createEventAndSnapshot(event Event, aggregate Ag
 		}
 		transactItems = append(transactItems, types.TransactWriteItem{Put: putSnapshot2})
 	}
-	request := &dynamodb.TransactWriteItemsInput{TransactItems: transactItems}
-	if _, err = es.client.TransactWriteItems(context.TODO(), request); err != nil {
+
+	if _, err = es.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: transactItems}); err != nil {
 		var t *types.TransactionCanceledException
 		switch {
 		case errors.As(err, &t):
@@ -557,6 +568,7 @@ func (es *EventStoreOnDynamoDB) createEventAndSnapshot(event Event, aggregate Ag
 			return NewIOError("Failed to transact write items", err)
 		}
 	}
+
 	return nil
 }
 
@@ -566,19 +578,19 @@ func (es *EventStoreOnDynamoDB) createEventAndSnapshot(event Event, aggregate Ag
 // - aggregateId is an aggregateId to delete.
 // # Returns
 // - an error
-func (es *EventStoreOnDynamoDB) deleteExcessSnapshots(aggregateId AggregateId) error {
+func (es *EventStoreOnDynamoDB) deleteExcessSnapshots(ctx context.Context, aggregateId AggregateId) error {
 	if aggregateId == nil {
 		return errors.New("aggregateId is nil")
 	}
 	if es.keepSnapshot && es.keepSnapshotCount > 0 {
-		snapshotCount, err := es.getSnapshotCount(aggregateId)
+		snapshotCount, err := es.getSnapshotCount(ctx, aggregateId)
 		if err != nil {
 			return err
 		}
 		snapshotCount -= 1
 		excessCount := uint32(snapshotCount) - es.keepSnapshotCount
 		if excessCount > 0 {
-			keys, err := es.getLastSnapshotKeys(aggregateId, int32(excessCount))
+			keys, err := es.getLastSnapshotKeys(ctx, aggregateId, int32(excessCount))
 			if err != nil {
 				return err
 			}
@@ -600,6 +612,7 @@ func (es *EventStoreOnDynamoDB) deleteExcessSnapshots(aggregateId AggregateId) e
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -609,19 +622,19 @@ func (es *EventStoreOnDynamoDB) deleteExcessSnapshots(aggregateId AggregateId) e
 // - aggregateId is an aggregateId to update.
 // # Returns
 // - an error
-func (es *EventStoreOnDynamoDB) updateTtlOfExcessSnapshots(aggregateId AggregateId) error {
+func (es *EventStoreOnDynamoDB) updateTtlOfExcessSnapshots(ctx context.Context, aggregateId AggregateId) error {
 	if aggregateId == nil {
 		return errors.New("aggregateId is nil")
 	}
 	if es.keepSnapshot && es.keepSnapshotCount > 0 {
-		snapshotCount, err := es.getSnapshotCount(aggregateId)
+		snapshotCount, err := es.getSnapshotCount(ctx, aggregateId)
 		if err != nil {
 			return err
 		}
 		snapshotCount -= 1
 		excessCount := uint32(snapshotCount) - es.keepSnapshotCount
 		if excessCount > 0 {
-			keys, err := es.getLastSnapshotKeys(aggregateId, int32(excessCount))
+			keys, err := es.getLastSnapshotKeys(ctx, aggregateId, int32(excessCount))
 			if err != nil {
 				return err
 			}
@@ -641,12 +654,13 @@ func (es *EventStoreOnDynamoDB) updateTtlOfExcessSnapshots(aggregateId Aggregate
 						":ttl": &types.AttributeValueMemberN{Value: strconv.FormatInt(ttl, 10)},
 					},
 				}
-				if _, err := es.client.UpdateItem(context.Background(), request); err != nil {
+				if _, err := es.client.UpdateItem(ctx, request); err != nil {
 					return NewIOError("Failed to updateTtlOfExcessSnapshots updateItem", err)
 				}
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -657,10 +671,11 @@ func (es *EventStoreOnDynamoDB) updateTtlOfExcessSnapshots(aggregateId Aggregate
 // # Returns
 // - a snapshot count
 // - an error
-func (es *EventStoreOnDynamoDB) getSnapshotCount(aggregateId AggregateId) (int32, error) {
+func (es *EventStoreOnDynamoDB) getSnapshotCount(ctx context.Context, aggregateId AggregateId) (int32, error) {
 	if aggregateId == nil {
 		return 0, errors.New("aggregateId is nil")
 	}
+
 	request := &dynamodb.QueryInput{
 		TableName:              aws.String(es.snapshotTableName),
 		IndexName:              aws.String(es.snapshotAidIndexName),
@@ -673,7 +688,7 @@ func (es *EventStoreOnDynamoDB) getSnapshotCount(aggregateId AggregateId) (int32
 		},
 		Select: types.SelectCount,
 	}
-	response, err := es.client.Query(context.Background(), request)
+	response, err := es.client.Query(ctx, request)
 	if err != nil {
 		return 0, NewIOError("Failed to getSnapshotCount query", err)
 	}
@@ -693,10 +708,11 @@ type pkeyAndSkey struct {
 // # Returns
 // - a list of keys
 // - an error
-func (es *EventStoreOnDynamoDB) getLastSnapshotKeys(aggregateId AggregateId, limit int32) ([]pkeyAndSkey, error) {
+func (es *EventStoreOnDynamoDB) getLastSnapshotKeys(ctx context.Context, aggregateId AggregateId, limit int32) ([]pkeyAndSkey, error) {
 	if aggregateId == nil {
 		return nil, errors.New("aggregateId is nil")
 	}
+
 	request := &dynamodb.QueryInput{
 		TableName:              aws.String(es.snapshotTableName),
 		IndexName:              aws.String(es.snapshotAidIndexName),
@@ -717,10 +733,11 @@ func (es *EventStoreOnDynamoDB) getLastSnapshotKeys(aggregateId AggregateId, lim
 		request.ExpressionAttributeNames["#ttl"] = "ttl"
 		request.ExpressionAttributeValues[":ttl"] = &types.AttributeValueMemberN{Value: "0"}
 	}
-	response, err := es.client.Query(context.Background(), request)
+	response, err := es.client.Query(ctx, request)
 	if err != nil {
 		return nil, NewIOError("Failed to getLastSnapshotKeys query", err)
 	}
+
 	var pkeySkeys []pkeyAndSkey
 	for _, item := range response.Items {
 		pkey := item["pkey"].(*types.AttributeValueMemberS).Value
@@ -731,5 +748,6 @@ func (es *EventStoreOnDynamoDB) getLastSnapshotKeys(aggregateId AggregateId, lim
 		}
 		pkeySkeys = append(pkeySkeys, pkeySkey)
 	}
+
 	return pkeySkeys, nil
 }

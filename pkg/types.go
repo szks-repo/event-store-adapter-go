@@ -1,69 +1,10 @@
 package pkg
 
-import (
-	"fmt"
-)
+// AggregateConverter is the function type that converts map[string]any to Aggregate.
+type AggregateConverter func(map[string]any) (Aggregate, error)
 
-// AggregateId is the interface that represents the aggregate id of DDD.
-type AggregateId interface {
-	fmt.Stringer
-
-	// GetTypeName returns the type name of the aggregate id.
-	GetTypeName() string
-
-	// GetValue returns the value of the aggregate id.
-	GetValue() string
-
-	// AsString returns the string representation of the aggregate id.
-	//
-	// The string representation is {TypeName}-{Value}.
-	AsString() string
-}
-
-// Event is the interface that represents the domain event of DDD.
-type Event interface {
-	fmt.Stringer
-	// GetId returns the id of the event.
-	GetId() string
-
-	// GetTypeName returns the type name of the event.
-	GetTypeName() string
-
-	// GetAggregateId returns the aggregate id of the event.
-	GetAggregateId() AggregateId
-
-	// GetSeqNr returns the sequence number of the event.
-	GetSeqNr() uint64
-
-	// IsCreated returns true if the event is created.
-	IsCreated() bool
-
-	// GetOccurredAt returns the occurred at of the event.
-	GetOccurredAt() uint64
-}
-
-// Aggregate is the interface that represents the aggregate of DDD.
-type Aggregate interface {
-	fmt.Stringer
-
-	// GetId returns the id of the aggregate.
-	GetId() AggregateId
-
-	// GetSeqNr returns the sequence number of the aggregate.
-	GetSeqNr() uint64
-
-	// GetVersion returns the version of the aggregate.
-	GetVersion() uint64
-
-	// WithVersion returns a new aggregate with the specified version.
-	WithVersion(version uint64) Aggregate
-}
-
-// AggregateConverter is the function type that converts map[string]interface{} to Aggregate.
-type AggregateConverter func(map[string]interface{}) (Aggregate, error)
-
-// EventConverter is the function type that converts map[string]interface{} to Event.
-type EventConverter func(map[string]interface{}) (Event, error)
+// EventConverter is the function type that converts map[string]any to Event.
+type EventConverter func(map[string]any) (Event, error)
 
 // AggregateResult is the result of aggregate.
 type AggregateResult struct {
@@ -93,7 +34,7 @@ type EventSerializer interface {
 	// Serialize serializes the event.
 	Serialize(event Event) ([]byte, error)
 	// Deserialize deserializes the event.
-	Deserialize(data []byte, eventMap *map[string]interface{}) error
+	Deserialize(data []byte, eventMap *map[string]any) error
 }
 
 // SnapshotSerializer is an interface that serializes and deserializes snapshots.
@@ -101,7 +42,7 @@ type SnapshotSerializer interface {
 	// Serialize serializes the aggregate.
 	Serialize(aggregate Aggregate) ([]byte, error)
 	// Deserialize deserializes the aggregate.
-	Deserialize(data []byte, aggregateMap *map[string]interface{}) error
+	Deserialize(data []byte, aggregateMap *map[string]any) error
 }
 
 // EventStoreBaseError is a base error of EventStore.

@@ -2,9 +2,11 @@ package test
 
 import (
 	"fmt"
-	esag "github.com/j5ik2o/event-store-adapter-go/pkg"
 	"math/rand"
+	"sync"
 	"time"
+
+	esag "github.com/szks-repo/event-store-adapter-go/pkg"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -38,6 +40,7 @@ type userAccount struct {
 	Name    string
 	SeqNr   uint64
 	Version uint64
+	mu      sync.Mutex
 }
 
 func newUserAccount(id userAccountId, name string) (*userAccount, *userAccountCreated) {
@@ -102,13 +105,17 @@ type userAccountResult struct {
 func (ua *userAccount) Rename(name string) (*userAccountResult, error) {
 	updatedUserAccount := *ua
 	updatedUserAccount.Name = name
-	updatedUserAccount.SeqNr += 1
+	updatedUserAccount.IncrementSeq()
 	event := newUserAccountNameChanged(newULID().String(), &ua.Id, updatedUserAccount.SeqNr, name, uint64(time.Now().UnixNano()))
 	return &userAccountResult{&updatedUserAccount, event}, nil
 }
 
 func (ua *userAccount) Equals(other *userAccount) bool {
 	return ua.Id.Value == other.Id.Value && ua.Name == other.Name
+}
+
+func (ua *userAccount) IncrementSeq() {
+	ua.SeqNr++
 }
 
 func newULID() ulid.ULID {

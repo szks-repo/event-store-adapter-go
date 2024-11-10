@@ -10,8 +10,7 @@ type KeyResolver interface {
 	ResolveSkey(aggregateId AggregateId, seqNr uint64) string
 }
 
-type DefaultKeyResolver struct {
-}
+type DefaultKeyResolver struct{}
 
 func (kr *DefaultKeyResolver) ResolvePkey(aggregateId AggregateId, shardCount uint64) string {
 	idTypeName := aggregateId.GetTypeName()
